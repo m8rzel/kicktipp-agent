@@ -11,6 +11,13 @@ import { appendAudit } from './audit/log.js';
 // ── Errors ─────────────────────────────────────────────────────────
 /** The session is gone or was never valid — logging in again may help. */
 export class AuthError extends Error {
+    loginPage;
+    constructor(message, 
+    /** The login page Kicktipp sent the request to; its host may differ from the configured one. */
+    loginPage) {
+        super(message);
+        this.loginPage = loginPage;
+    }
 }
 /** The page does not exist — usually a wrong community name. */
 export class NotFoundError extends Error {
@@ -28,7 +35,7 @@ async function loadPage(page, url) {
         throw new AdminRequiredError(`Spielleiter (admin) rights are required for ${url}.`);
     }
     if (page.isAuthRedirect()) {
-        throw new AuthError(`Kicktipp session is not authenticated (redirected to ${page.url()}). Verify credentials.`);
+        throw new AuthError(`Kicktipp session is not authenticated (redirected to ${page.url()}). Verify credentials.`, page.url());
     }
     if (page.isNotFound()) {
         throw new NotFoundError(`Kicktipp page not found: ${url}. Check the community name.`);
@@ -52,7 +59,7 @@ export async function submitAudited(page, record) {
     try {
         await page.click('button[name="submitbutton"]');
         if (page.isAuthRedirect()) {
-            throw new AuthError('Kicktipp session expired while submitting. The bets were not saved.');
+            throw new AuthError('Kicktipp session expired while submitting. The bets were not saved.', page.url());
         }
     }
     catch (err) {
@@ -100,6 +107,10 @@ export async function loadMatchPredictPage(page, community, matchday) {
 export async function fetchCurrentMatchday(page, community) {
     const $ = await loadMatchPredictPage(page, community);
     return spieltagIndexFromPage($) ?? null;
+}
+/** Open the community's tip page; throws AuthError or NotFoundError when this account cannot. */
+export async function assertCommunityReachable(page, community) {
+    await loadPage(page, getPredictUrl(community));
 }
 export async function resolveCommunity(page) {
     const saved = loadCommunity();
