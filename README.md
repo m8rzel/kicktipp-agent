@@ -60,7 +60,36 @@ This command downloads the `kicktipp-agent` package when needed and starts the M
 claude mcp add kicktipp -- npx -y -p kicktipp-agent kicktipp-agent-mcp
 ```
 
-The long name `kicktipp-agent-mcp` is the server binary. `kicktipp-mcp` is the same binary under a shorter name.
+The long name `kicktipp-agent-mcp` is the server binary. `kicktipp-mcp` and `kicktipp-agent` are the same binary under other names. All three start the MCP server, not the `kicktipp` command.
+
+#### Straight from GitHub
+
+No npm release, no clone, no build. `npx` fetches this repository and starts the MCP server:
+
+```bash
+claude mcp add kicktipp -s user -- npx -y git+https://github.com/m8rzel/kicktipp-agent.git
+```
+
+`-s user` makes the server available in every project, not just the folder you run the command in.
+
+The same as a JSON entry for any MCP client (Claude Desktop: `claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "kicktipp": {
+      "command": "npx",
+      "args": ["-y", "git+https://github.com/m8rzel/kicktipp-agent.git"]
+    }
+  }
+}
+```
+
+- `-y` skips npx's "Ok to proceed?" prompt. Without it, npx waits for an answer an MCP client never gives, and the start times out.
+- Run the `npx` line once in a terminal before you add it to a client. The first start downloads the dependencies and can take half a minute. After that the cache is warm and it starts in about a second. Stop it with Ctrl-C once it is quiet. A cold first start can otherwise run into the client's start timeout (Claude Code: `MCP_TIMEOUT` in milliseconds).
+- Nothing is compiled on your machine: `dist/` is committed (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+- **Pin a version.** Without one, npx takes the current `main`, so every push changes your install on the next start. Put a tag behind the URL: `git+https://github.com/m8rzel/kicktipp-agent.git#v1.2.0-fork.1`. Updating is then a deliberate step: raise the tag, restart the client. Only the `-fork.N` tags work here. The plain tags (`v1.2.0`, `v1.1.1`, …) come from the original repository, have no `dist/` and do not start.
+- The repository is public, so no GitHub login is needed. If it ever fails with exit code 128 and no message, git could not clone it. Run the line in a terminal to see why.
 
 #### From this repo
 
@@ -457,6 +486,12 @@ Turn the extension off if you also added the JSON snippet, so only one server ru
 claude mcp add kicktipp -- npx -y -p kicktipp-agent kicktipp-agent-mcp
 ```
 
+**Straight from GitHub**, no npm release and no clone. Details under [Straight from GitHub](#straight-from-github).
+
+```bash
+claude mcp add kicktipp -s user -- npx -y git+https://github.com/m8rzel/kicktipp-agent.git
+```
+
 **This repo**, after `npm install` and `npm run build`. Replace the path.
 
 ```bash
@@ -538,7 +573,10 @@ See [CHANGELOG.md](CHANGELOG.md).
 npm test          # run tests
 npm run build     # compile TypeScript
 npm run pack:mcpb # zip dist + production deps into kicktipp.mcpb
+npm run verify:dist # rebuild and fail if the committed dist/ is out of date
 ```
+
+`dist/` is committed so that `npx -y git+https://…` starts without a build. Build before every commit. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Credits
 
