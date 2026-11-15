@@ -504,6 +504,16 @@ Start a new chat. If Kicktipp is not signed in yet, tell the assistant to set up
 
 The setup page has a checkbox to keep the login cookie and drop the password (`store = session` under `[auth]`). A leaked config then has no Kicktipp password, and you can revoke the cookie on the Kicktipp site. When Kicktipp expires the session, this tool cannot log in again by itself. Tools return a fresh setup link instead. Opt-in, not the default.
 
+### Unattended runs
+
+Agents that place tips on a schedule, with nobody at the screen, need a login the server can renew by itself. Every tool logs in again on its own when Kicktipp ends the session. That includes `place_bets`, `place_bonus_bets` and `place_bets_for_member`, which retry once after a fresh login. A submit that Kicktipp bounced to the login page is sent again, never reported as saved. Where the login comes from decides whether that works:
+
+- **In a container or on a server: env.** Put `KICKTIPP_EMAIL`, `KICKTIPP_PASSWORD` and `KICKTIPP_COMMUNITY` (optionally `KICKTIPP_PLAYER`) into the client's `env` block, as secrets. A password saved through the setup page is encrypted for the host and user that saved it. A rebuilt container is a new host, and the saved password stops working. The setup page also only listens on `127.0.0.1` of the machine the server runs on. Point `KICKTIPP_DATA_DIR` at a persistent volume if the audit log and the season cache should survive a rebuild.
+- **On your own computer: save the password.** Leave "session only" unticked on the setup page. Session-only keeps a cookie and no password, so once Kicktipp ends the session, a person has to sign in again.
+- **Check before the run.** `get_status` reports `auth_mode` (`env`, `password`, `session_only` or `none`) without going online. `connect_account` logs in for real. `connected: true` means the run can go. Otherwise `reason` says why (`missing`, `session_only_expired`, `rejected` or `unreadable`), together with a `setup_url`. Wrong env credentials come back as an error that names the env variables, because a setup page cannot override them.
+
+A setup link from a tool means a person has to act. With env credentials or a saved password, that only happens when Kicktipp no longer accepts them.
+
 ### Environment variables
 
 An `env` block in the client config still works and wins over the file. Use it only when a client cannot use the setup page or Desktop's settings form. The password then sits in that client's config:
@@ -528,7 +538,7 @@ An `env` block in the client config still works and wins over the file. Use it o
 | Tool | Description |
 |------|-------------|
 | `get_status` | Check if credentials and community are configured |
-| `connect_account` | Open the localhost setup page (for "set up kicktipp" / reconnect) |
+| `connect_account` | Log in for real and report whether it works; returns a localhost setup link only when it does not, or with `switch_account` |
 | `get_today_matches` | Today's matches with bet status |
 | `get_bets` | Matches and current bets for a matchday |
 | `get_schedule` | Match schedule with results |
