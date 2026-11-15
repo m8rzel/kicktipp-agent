@@ -5,7 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { localizeMatchDates } from './helpers/match-date.js';
 import { applyNotifierSettings, notifierSnapshot } from './notify/backends.js';
-import { Page, launchBrowser, LoginFailedError } from './browser.js';
+import { Page, launchBrowser, loginWhereRedirected, LoginFailedError, SessionOnlyOtherSiteError } from './browser.js';
 import { saveCommunity, savePlayer, loadCommunity, loadPlayer, hasUsableAuth, isSessionOnly, SessionOnlyExpiredError, CredentialsUnreadableError, authMode, hasEnvCredentials, getActiveProfile, readDefaultStrategy, readUiLanguage, readUiSite } from './config.js';
 import { VERSION } from './version.js';
 import { resolveLanguage, setLanguage } from './i18n/index.js';
@@ -28,6 +28,8 @@ import { toOddsMatches } from './analytics/odds.js';
 import { STRATEGIES, suggestBets, type StrategyName } from './analytics/strategies.js';
 import {
   AuthError,
+  NotFoundError,
+  assertCommunityReachable,
   resolveCommunity,
   fetchTodayMatches,
   fetchBets,
@@ -61,9 +63,9 @@ let pageInstance: Page | null = null;
  * an agent relays it verbatim, and "session expired" for a rejected password
  * sends the user hunting for the wrong problem.
  */
-type SetupReason = 'missing' | 'session_only_expired' | 'rejected' | 'unreadable' | 'switch_account';
+type SetupReason = 'missing' | 'session_only_expired' | 'session_only_other_site' | 'rejected' | 'unreadable' | 'switch_account';
 
-async function setupPrompt(reason: SetupReason): Promise<{ url: string; text: string }> {
+async function setupPrompt(reason: SetupReason, site?: string): Promise<{ url: string; text: string }> {
   const url = await ensureSetupListener({
     keepAlive: false,
     onSaved: () => {
@@ -73,6 +75,7 @@ async function setupPrompt(reason: SetupReason): Promise<{ url: string; text: st
   const text = {
     missing: `Not set up yet. Ask the user to open ${url} to connect their Kicktipp account.`,
     session_only_expired: `The saved Kicktipp session expired, and no password is stored to log in again (session-only mode). Ask the user to open ${url} to reconnect. For unattended runs, leave "session only" unticked there so the tool can log in again by itself.`,
+    session_only_other_site: `The community lives on ${site ?? 'the other Kicktipp site'}, but only a session cookie is saved, no password, so the tool cannot log in there. Ask the user to open ${url} and either pick that site or leave "session only" unticked.`,
     rejected: `Kicktipp rejected the saved email and password. Ask the user to open ${url} to enter them again.`,
     unreadable: `The saved Kicktipp password cannot be read on this machine: it is tied to the host and user that saved it, and a rebuilt container counts as a new host. Ask the user to open ${url} to enter it again, or set KICKTIPP_EMAIL and KICKTIPP_PASSWORD in the MCP client's env.`,
     switch_account: `Ask the user to open ${url} to sign in to Kicktipp with the account they want.`,
@@ -92,8 +95,8 @@ class SetupNeededError extends Error {
   }
 }
 
-async function setupNeeded(reason: SetupReason): Promise<SetupNeededError> {
-  const { url, text } = await setupPrompt(reason);
+async function setupNeeded(reason: SetupReason, site?: string): Promise<SetupNeededError> {
+  const { url, text } = await setupPrompt(reason, site);
   return new SetupNeededError(reason, url, text);
 }
 
@@ -105,19 +108,40 @@ async function getPage(): Promise<Page> {
     pageInstance = page;
     return page;
   } catch (err) {
-    if (err instanceof SessionOnlyExpiredError) throw await setupNeeded('session_only_expired');
-    if (err instanceof CredentialsUnreadableError) throw await setupNeeded('unreadable');
-    if (err instanceof LoginFailedError) {
-      // The setup page writes config.ini, but the environment wins over the
-      // file: sending the user there would change nothing.
-      if (hasEnvCredentials()) {
-        throw new Error(
-          'Kicktipp rejected KICKTIPP_EMAIL / KICKTIPP_PASSWORD from the environment. Fix them in the MCP client configuration.',
-        );
-      }
-      throw await setupNeeded('rejected');
+    return explainLoginFailure(err);
+  }
+}
+
+/** Turn a failed login into the message the user has to act on. */
+async function explainLoginFailure(err: unknown): Promise<never> {
+  if (err instanceof SessionOnlyExpiredError) throw await setupNeeded('session_only_expired');
+  if (err instanceof SessionOnlyOtherSiteError) throw await setupNeeded('session_only_other_site', err.site);
+  if (err instanceof CredentialsUnreadableError) throw await setupNeeded('unreadable');
+  if (err instanceof LoginFailedError) {
+    // The setup page writes config.ini, but the environment wins over the
+    // file: sending the user there would change nothing.
+    if (hasEnvCredentials()) {
+      throw new Error(
+        'Kicktipp rejected KICKTIPP_EMAIL / KICKTIPP_PASSWORD from the environment. Fix them in the MCP client configuration.',
+      );
     }
-    throw err;
+    throw await setupNeeded('rejected');
+  }
+  throw err;
+}
+
+/**
+ * Logging in worked, but Kicktipp still answers this request with its login
+ * page. A setup link cannot fix that: usually the account is not a member
+ * of the community, or the community needs its own password.
+ */
+class StillLoggedOutError extends Error {
+  constructor(loginPage: string | undefined) {
+    super(
+      `Logged in to Kicktipp again, but it still sends this request to the login page${loginPage ? ` (${loginPage})` : ''}. ` +
+        'The login itself works, so a setup page will not help: check that this account is a member of the community. Nothing was saved.',
+    );
+    this.name = 'StillLoggedOutError';
   }
 }
 
@@ -145,15 +169,16 @@ async function withFreshSession<T>(fn: () => Promise<T>): Promise<T> {
   } catch (err) {
     if (!(err instanceof AuthError)) throw err;
     await discardSession();
+    // The community may live on the other Kicktipp host (kicktipp.de vs
+    // kicktipp.com), where the session of the configured host does not count.
+    const page = await getPage();
+    await loginWhereRedirected(page, err.loginPage).catch(explainLoginFailure);
   }
   try {
     return await fn();
   } catch (err) {
     if (!(err instanceof AuthError)) throw err;
-    // The login itself went through, so a setup page would not help.
-    throw new Error(
-      `Logged in to Kicktipp again, but it still sends this request to the login page. Nothing was saved. (${err.message})`,
-    );
+    throw new StillLoggedOutError(err.loginPage);
   }
 }
 
@@ -222,7 +247,7 @@ server.registerTool(
   'connect_account',
   {
     description:
-      'Connect a Kicktipp account, or check that the saved login still works. It logs in for real: connected=true means every tool can run, and no setup page is needed. Only when it returns a setup_url must the user open that localhost page in a browser. Never ask them to paste a password into chat. Tools log in again by themselves when the session expires, and one that cannot returns its own setup link.',
+      'Connect a Kicktipp account, or check that the saved login still works. It logs in for real and opens the active community: connected=true with community_reachable=true means every tool can run, and no setup page is needed. community_reachable=false comes with the reason in message; calling this again will not change it. Only when it returns a setup_url must the user open that localhost page in a browser. Never ask them to paste a password into chat. Tools log in again by themselves when the session expires, and one that cannot returns its own setup link.',
     inputSchema: {
       reconnect: z
         .boolean()
@@ -247,12 +272,24 @@ server.registerTool(
         message: prompt.text,
       });
     }
+    let communityProblem: string | null = null;
     try {
       // Prove the login instead of trusting what is on disk: a fresh launch
       // reuses the saved cookie if Kicktipp still accepts it, and otherwise
       // logs in with the stored password.
       await discardSession();
       await getPage();
+      // "Logged in" is worth little if the community itself bounces to the
+      // login page; that is what kept an agent calling this in a loop.
+      if (community) {
+        try {
+          await withFreshSession(async () => assertCommunityReachable(await getPage(), community));
+        } catch (err) {
+          if (err instanceof StillLoggedOutError) communityProblem = err.message;
+          else if (err instanceof NotFoundError) communityProblem = `Kicktipp does not know the community "${community}".`;
+          else throw err;
+        }
+      }
     } catch (err) {
       if (!(err instanceof SetupNeededError)) throw err;
       return jsonResult({
@@ -267,12 +304,15 @@ server.registerTool(
     return jsonResult({
       connected: true,
       login_verified: true,
+      community_reachable: community ? !communityProblem : null,
       setup_url: null,
       community: community || null,
       session_only: isSessionOnly(),
-      message: community
-        ? 'Connected, and the login works. No setup needed.'
-        : 'Connected, and the login works, but no community is set. Call get_communities then set_community.',
+      message: !community
+        ? 'Connected, and the login works, but no community is set. Call get_communities then set_community.'
+        : communityProblem
+          ? `The login works, but the community "${community}" cannot be opened. ${communityProblem} Call get_communities to see the communities this account can open. Calling connect_account again will not change this.`
+          : 'Connected, the login works and the community opens. No setup needed.',
     });
   },
 );

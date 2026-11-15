@@ -33,7 +33,15 @@ import { appendAudit, type AuditBet, type AuditRecord, type BetSource } from './
 // ── Errors ─────────────────────────────────────────────────────────
 
 /** The session is gone or was never valid — logging in again may help. */
-export class AuthError extends Error {}
+export class AuthError extends Error {
+  constructor(
+    message: string,
+    /** The login page Kicktipp sent the request to; its host may differ from the configured one. */
+    readonly loginPage?: string,
+  ) {
+    super(message);
+  }
+}
 
 /** The page does not exist — usually a wrong community name. */
 export class NotFoundError extends Error {}
@@ -57,6 +65,7 @@ async function loadPage(page: Page, url: string): Promise<cheerio.CheerioAPI> {
   if (page.isAuthRedirect()) {
     throw new AuthError(
       `Kicktipp session is not authenticated (redirected to ${page.url()}). Verify credentials.`,
+      page.url(),
     );
   }
   if (page.isNotFound()) {
@@ -83,7 +92,7 @@ export async function submitAudited(page: Page, record: Omit<AuditRecord, 'outco
   try {
     await page.click('button[name="submitbutton"]');
     if (page.isAuthRedirect()) {
-      throw new AuthError('Kicktipp session expired while submitting. The bets were not saved.');
+      throw new AuthError('Kicktipp session expired while submitting. The bets were not saved.', page.url());
     }
   } catch (err) {
     appendAudit({
@@ -135,6 +144,11 @@ export async function loadMatchPredictPage(
 export async function fetchCurrentMatchday(page: Page, community: string): Promise<number | null> {
   const $ = await loadMatchPredictPage(page, community);
   return spieltagIndexFromPage($) ?? null;
+}
+
+/** Open the community's tip page; throws AuthError or NotFoundError when this account cannot. */
+export async function assertCommunityReachable(page: Page, community: string): Promise<void> {
+  await loadPage(page, getPredictUrl(community));
 }
 
 export async function resolveCommunity(page: Page): Promise<string> {

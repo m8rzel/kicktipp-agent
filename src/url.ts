@@ -151,6 +151,11 @@ export function urlBase(): string {
   return currentBase;
 }
 
+/** The configured site's counterpart: kicktipp.de for kicktipp.com and back; any other base maps to itself. */
+export function otherSite(): string {
+  return oppositeBase(currentBase);
+}
+
 function routePath(route: RouteKey, community?: string, base = urlBase()): string {
   const template = ROUTES[route][languageForBase(base)];
   if (!template.includes(':community')) return template;
@@ -188,6 +193,11 @@ function matchdayParams(matchday?: number, extra?: Record<string, string>): URLS
 
 export function urlLogin(): string {
   return buildUrl('login');
+}
+
+/** The login page on a given Kicktipp host, e.g. kicktipp.de while the base is kicktipp.com. */
+export function getLoginUrlOn(base: string): string {
+  return buildUrl('login', undefined, undefined, normalizeBaseUrl(base));
 }
 
 export function getCommunitiesUrl(): string {

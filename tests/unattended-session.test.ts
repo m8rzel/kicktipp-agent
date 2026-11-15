@@ -286,8 +286,26 @@ describe('connect_account', () => {
     const result = await callTool('connect_account', {}, env());
     const data = result.structuredContent.data;
 
-    expect(data).toMatchObject({ connected: true, login_verified: true, setup_url: null, community: 'mycomm' });
+    expect(data).toMatchObject({
+      connected: true,
+      login_verified: true,
+      community_reachable: true,
+      setup_url: null,
+      community: 'mycomm',
+    });
     expect(kicktipp.logins).toBe(1);
+  });
+
+  it('says so when the login works but the community stays closed', async () => {
+    kicktipp = await fakeKicktipp('on-every-load');
+    writeConfig(withPassword(PASSWORD));
+
+    const result = await callTool('connect_account', {}, env());
+    const data = result.structuredContent.data;
+
+    expect(data).toMatchObject({ connected: true, community_reachable: false, setup_url: null });
+    expect(data.message).toMatch(/member of the community/);
+    expect(data.message).toMatch(/Calling connect_account again will not change this/);
   });
 
   it('says the password was rejected, not that the session expired', async () => {

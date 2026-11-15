@@ -1,7 +1,7 @@
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import fs from 'fs';
-import { urlLogin, getCommunitiesUrl, getLeaderboardUrl } from './url.js';
+import { urlLogin, urlBase, otherSite, getLoginUrlOn, getCommunitiesUrl, getLeaderboardUrl } from './url.js';
 import { sessionFile, loadCredentials, isSessionOnly, SessionOnlyExpiredError } from './config.js';
 import { status, statusClear } from './helpers/spinner.js';
 import { t } from './i18n/index.js';
@@ -65,9 +65,14 @@ export class LoginFailedError extends Error {
   }
 }
 
-export async function login(page: Page, username: string, password: string): Promise<void> {
+export async function login(
+  page: Page,
+  username: string,
+  password: string,
+  loginUrl: string = urlLogin(),
+): Promise<void> {
   status(t('status.loggingIn'));
-  await page.goto(urlLogin());
+  await page.goto(loginUrl);
 
   if (!page.has('input[name="kennung"]')) {
     statusClear();
@@ -84,6 +89,57 @@ export async function login(page: Page, username: string, password: string): Pro
     throw new LoginFailedError(t('login.failed'));
   }
   statusClear();
+}
+
+/**
+ * The community lives on the other Kicktipp site, and only a session cookie
+ * for the configured one is saved: without a password there is no logging
+ * in over there.
+ */
+export class SessionOnlyOtherSiteError extends Error {
+  constructor(readonly site: string) {
+    super(`The community lives on ${site}, but only a session for ${urlBase()} is saved, without a password.`);
+    this.name = 'SessionOnlyOtherSiteError';
+  }
+}
+
+/**
+ * Kicktipp sent a request to the login page of the other site. A community
+ * can live on kicktipp.de while the configured base is kicktipp.com (or the
+ * other way round), and a session cookie only counts on the site that set
+ * it, so log in there as well.
+ *
+ * The redirect only decides whether to log in, never where: the password
+ * goes to the fixed counterpart of the configured site, with its scheme,
+ * and nowhere else. Returns false when there is nothing to do here — the
+ * login page is on the configured site (logging in again there is the
+ * caller's job), or on any host other than that counterpart.
+ */
+export async function loginWhereRedirected(
+  page: Page,
+  loginPage: string | undefined,
+  opts: { sessionFile?: string | null } = {},
+): Promise<boolean> {
+  if (!loginPage) return false;
+  const base = new URL(urlBase());
+  const other = new URL(otherSite());
+  const target = new URL(loginPage);
+  if (other.hostname === base.hostname || target.hostname !== other.hostname) return false;
+  if (isSessionOnly()) throw new SessionOnlyOtherSiteError(other.origin);
+  const { email, password } = await loadCredentials();
+  try {
+    await login(page, email, password, getLoginUrlOn(other.origin));
+  } catch (err) {
+    if (!(err instanceof LoginFailedError)) throw err;
+    // Not the usual "wrong password": the same login just worked on the
+    // configured site, so asking for it again would not help.
+    throw new Error(
+      `${other.hostname} rejected the email and password that work on ${base.hostname}. The community lives on ${other.hostname}; check the account there.`,
+    );
+  }
+  const file = opts.sessionFile === undefined ? sessionFile() : opts.sessionFile;
+  if (file) page.saveSession(file);
+  return true;
 }
 
 export async function getCommunities(page: Page): Promise<string[]> {
