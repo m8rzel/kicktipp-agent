@@ -1,5 +1,6 @@
 node_modules/
-dist/
+# dist/ is committed on purpose: `npx -y git+https://…` must not compile on start.
+# See CONTRIBUTING.md: run `npm run build` before every commit.
 .session.json
 .env
 .claude/
