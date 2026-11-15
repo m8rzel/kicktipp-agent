@@ -106,6 +106,18 @@ function encrypt(text: string): string {
   return `enc.${packed.toString('base64')}`;
 }
 
+/**
+ * The stored password was encrypted for another host or user — typically a
+ * rebuilt container, whose hostname changes. Only entering it again (or
+ * passing it as env) helps.
+ */
+export class CredentialsUnreadableError extends Error {
+  constructor() {
+    super('The saved Kicktipp password cannot be decrypted on this machine.');
+    this.name = 'CredentialsUnreadableError';
+  }
+}
+
 function decrypt(encoded: string): string {
   if (!encoded.startsWith('enc.')) return encoded; // backward compat: plaintext
   const packed = Buffer.from(encoded.slice(4), 'base64');
@@ -113,9 +125,13 @@ function decrypt(encoded: string): string {
   const authTag = packed.subarray(16, 32);
   const ciphertext = packed.subarray(32);
   const key = deriveKey();
-  const decipher = crypto.createDecipheriv(CIPHER_ALGO, key, iv);
-  decipher.setAuthTag(authTag);
-  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+  try {
+    const decipher = crypto.createDecipheriv(CIPHER_ALGO, key, iv);
+    decipher.setAuthTag(authTag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+  } catch {
+    throw new CredentialsUnreadableError();
+  }
 }
 
 // ── Config I/O ──────────────────────────────────────────────────────
@@ -155,7 +171,7 @@ function authBlock(config: Record<string, any>): Record<string, any> | undefined
 }
 
 export function isSessionOnly(): boolean {
-  if (process.env.KICKTIPP_PASSWORD) return false;
+  if (hasEnvCredentials()) return false;
   const block = authBlock(readConfig());
   return block?.store === 'session' && !block?.password;
 }
@@ -200,10 +216,19 @@ export function saveReadOnly(readOnly: boolean): void {
   writeConfig(config);
 }
 
+/** Login from the environment; it wins over anything in config.ini. */
+function envCredentials(): { email: string; password: string } | null {
+  const { KICKTIPP_EMAIL: email, KICKTIPP_PASSWORD: password } = process.env;
+  return email && password ? { email, password } : null;
+}
+
+export function hasEnvCredentials(): boolean {
+  return envCredentials() !== null;
+}
+
 export async function loadCredentials(): Promise<{ email: string; password: string }> {
-  if (process.env.KICKTIPP_EMAIL && process.env.KICKTIPP_PASSWORD) {
-    return { email: process.env.KICKTIPP_EMAIL, password: process.env.KICKTIPP_PASSWORD };
-  }
+  const fromEnv = envCredentials();
+  if (fromEnv) return fromEnv;
   const config = readConfig();
   const profile = profileSection(config);
   if (profile?.email && profile?.password) {
@@ -352,8 +377,19 @@ export function saveUiSite(site: string): void {
   patchUi({ site });
 }
 
+/**
+ * Where the login comes from, without touching the network: env wins over
+ * the file, a stored password over a session-only cookie.
+ */
+export function authMode(): 'env' | 'password' | 'session_only' | 'none' {
+  if (hasEnvCredentials()) return 'env';
+  if (hasCredentials()) return 'password';
+  if (hasUsableAuth()) return 'session_only';
+  return 'none';
+}
+
 export function hasCredentials(): boolean {
-  if (process.env.KICKTIPP_EMAIL && process.env.KICKTIPP_PASSWORD) return true;
+  if (hasEnvCredentials()) return true;
   const config = readConfig();
   const profile = profileSection(config);
   if (profile?.email && profile?.password) return true;

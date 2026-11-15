@@ -90,16 +90,8 @@ describe('the MCP server as a client sees it', () => {
     expect(result.structuredContent.data).not.toHaveProperty('password');
   });
 
-  it('connect_account reports already connected when credentials exist', async () => {
-    const messages = await callServer(
-      [INIT, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'connect_account', arguments: {} } }],
-      { HOME: home },
-    );
-    const data = messages.find((m) => m.id === 2)?.result?.structuredContent?.data;
-    expect(data.connected).toBe(true);
-    expect(data.setup_url).toBeNull();
-    expect(data.community).toBe('mycomm');
-  });
+  // connect_account now logs in for real; its tests run against a stand-in
+  // Kicktipp in unattended-session.test.ts.
 
   it('offers the cached-data resources', async () => {
     const messages = await callServer(

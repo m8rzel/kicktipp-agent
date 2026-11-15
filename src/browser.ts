@@ -57,6 +57,14 @@ export async function launchBrowser(opts: LaunchOptions = {}): Promise<{ page: P
   return { page };
 }
 
+/** Kicktipp turned the email/password pair down. Trying again will not help. */
+export class LoginFailedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LoginFailedError';
+  }
+}
+
 export async function login(page: Page, username: string, password: string): Promise<void> {
   status(t('status.loggingIn'));
   await page.goto(urlLogin());
@@ -73,7 +81,7 @@ export async function login(page: Page, username: string, password: string): Pro
   // A failed login lands back on the login page.
   if (page.isAuthRedirect()) {
     statusClear();
-    throw new Error(t('login.failed'));
+    throw new LoginFailedError(t('login.failed'));
   }
   statusClear();
 }
