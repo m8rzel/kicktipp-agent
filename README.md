@@ -510,7 +510,7 @@ Agents that place tips on a schedule, with nobody at the screen, need a login th
 
 - **In a container or on a server: env.** Put `KICKTIPP_EMAIL`, `KICKTIPP_PASSWORD` and `KICKTIPP_COMMUNITY` (optionally `KICKTIPP_PLAYER`) into the client's `env` block, as secrets. A password saved through the setup page is encrypted for the host and user that saved it. A rebuilt container is a new host, and the saved password stops working. The setup page also only listens on `127.0.0.1` of the machine the server runs on. Point `KICKTIPP_DATA_DIR` at a persistent volume if the audit log and the season cache should survive a rebuild.
 - **On your own computer: save the password.** Leave "session only" unticked on the setup page. Session-only keeps a cookie and no password, so once Kicktipp ends the session, a person has to sign in again.
-- **Check before the run.** `get_status` reports `auth_mode` (`env`, `password`, `session_only` or `none`) without going online. `connect_account` logs in for real. `connected: true` means the run can go. Otherwise `reason` says why (`missing`, `session_only_expired`, `rejected` or `unreadable`), together with a `setup_url`. Wrong env credentials come back as an error that names the env variables, because a setup page cannot override them.
+- **Check before the run.** `get_status` reports `auth_mode` (`env`, `password`, `session_only` or `none`) without going online. `connect_account` logs in for real and opens the active community. `connected: true` with `community_reachable: true` means the run can go. `community_reachable: false` means the login works but the community does not open for this account, so check the membership and the name (`get_communities`). Otherwise `reason` says why (`missing`, `session_only_expired`, `rejected` or `unreadable`), together with a `setup_url`. Wrong env credentials come back as an error that names the env variables, because a setup page cannot override them.
 
 A setup link from a tool means a person has to act. With env credentials or a saved password, that only happens when Kicktipp no longer accepts them.
 
@@ -570,6 +570,8 @@ For a connection that provably cannot bet, check read-only on the setup page, se
 ### kicktipp.com and kicktipp.de
 
 Both sites work. The default is `https://www.kicktipp.com`. If a page is missing there, the same page is tried on kicktipp.de (and the other way around), including German and English URL spellings. You usually do not have to pick.
+
+A login only counts on the site it was made on. When a community lives on the other site and Kicktipp answers with that site's login page, the MCP server logs in there as well, with the same email and password, and tries again. It only ever sends the password to kicktipp.com and kicktipp.de.
 
 To start on the German site on purpose, run `kicktipp set-site de` (or pick kicktipp.de on the setup page). `KICKTIPP_SITE=de` and `KICKTIPP_BASE_URL=https://www.kicktipp.de` still override for a single process.
 
