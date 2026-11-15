@@ -1,0 +1,113 @@
+import * as cheerio from 'cheerio';
+import fs from 'fs';
+import { urlLogin, getCommunitiesUrl, getLeaderboardUrl } from './url.js';
+import { sessionFile, loadCredentials, isSessionOnly, SessionOnlyExpiredError } from './config.js';
+import { status, statusClear } from './helpers/spinner.js';
+import { t } from './i18n/index.js';
+import { normalizeSlug } from './helpers/normalize-slug.js';
+import { CookieJar } from './http/cookie-jar.js';
+import { Page } from './http/page.js';
+export { Page } from './http/page.js';
+/**
+ * Open an authenticated Kicktipp session: restore the saved cookies when
+ * they still work, otherwise log in and save fresh ones.
+ */
+export async function launchBrowser(opts = {}) {
+    const file = opts.sessionFile === undefined ? sessionFile() : opts.sessionFile;
+    if (file && fs.existsSync(file)) {
+        status(t('status.restoringSession'));
+        try {
+            const stored = JSON.parse(fs.readFileSync(file, 'utf-8'));
+            const page = new Page(CookieJar.fromJSON(stored), opts.fetchImpl);
+            await page.goto(getCommunitiesUrl());
+            if (!page.isAuthRedirect() && !page.isNotFound()) {
+                statusClear();
+                return { page };
+            }
+        }
+        catch {
+            // An unreadable or outdated session file is not worth reporting —
+            // logging in again produces a good one.
+        }
+        status(t('status.sessionExpired'));
+    }
+    if (isSessionOnly()) {
+        statusClear();
+        throw new SessionOnlyExpiredError();
+    }
+    statusClear();
+    const { email, password } = await loadCredentials();
+    const page = new Page(new CookieJar(), opts.fetchImpl);
+    await login(page, email, password);
+    if (file)
+        page.saveSession(file);
+    return { page };
+}
+export async function login(page, username, password) {
+    status(t('status.loggingIn'));
+    await page.goto(urlLogin());
+    if (!page.has('input[name="kennung"]')) {
+        statusClear();
+        throw new Error(t('login.formMissing', { url: page.url() }));
+    }
+    page.setInputValue('input[name="kennung"]', username);
+    page.setInputValue('input[name="passwort"]', password);
+    await page.submitForm('input[name="kennung"]');
+    // A failed login lands back on the login page.
+    if (page.isAuthRedirect()) {
+        statusClear();
+        throw new Error(t('login.failed'));
+    }
+    statusClear();
+}
+export async function getCommunities(page) {
+    status(t('status.fetchingCommunities'));
+    await page.goto(getCommunitiesUrl());
+    if (page.isAuthRedirect()) {
+        statusClear();
+        throw new Error(t('login.notAuthenticated', { url: page.url() }));
+    }
+    const $ = cheerio.load(await page.content());
+    const communities = new Set();
+    // A community link is a single path segment ("/<slug>" or "/<slug>/") whose
+    // slug matches the link's own label. Kicktipp derives the slug from the
+    // community name — dropping underscores and turning spaces into hyphens —
+    // so the comparison has to be made on normalized forms.
+    const reserved = new Set(['info', 'service']);
+    $('#kicktipp-content a').each((_, el) => {
+        const href = $(el).attr('href') || '';
+        const match = href.match(/^\/([^/?#]+)\/?$/);
+        if (!match)
+            return;
+        const slug = decodeURIComponent(match[1]);
+        if (reserved.has(slug.toLowerCase()))
+            return;
+        const menuDiv = $(el).find('div.menu-title-mit-tippglocke');
+        if (normalizeSlug(slug) === normalizeSlug($(el).text().trim()) ||
+            (menuDiv.length && normalizeSlug(menuDiv.text().trim()) === normalizeSlug(slug))) {
+            communities.add(slug);
+        }
+    });
+    statusClear();
+    return Array.from(communities);
+}
+export function parseOdds($, td) {
+    const el = $(td);
+    const home = el.find('span.quote-heim span.quote-text').text().trim();
+    const draw = el.find('span.quote-remis span.quote-text').text().trim();
+    const road = el.find('span.quote-gast span.quote-text').text().trim();
+    return [home, draw, road];
+}
+export async function getPlayers(page, community) {
+    status(t('status.fetchingPlayers'));
+    await page.goto(getLeaderboardUrl(community));
+    statusClear();
+    const $ = cheerio.load(await page.content());
+    const players = [];
+    $('table#ranking tbody tr').each((_, tr) => {
+        const name = $(tr).find('div.mg_name').text().trim();
+        if (name)
+            players.push(name);
+    });
+    return players;
+}
