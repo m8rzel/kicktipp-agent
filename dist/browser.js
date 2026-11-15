@@ -43,6 +43,13 @@ export async function launchBrowser(opts = {}) {
         page.saveSession(file);
     return { page };
 }
+/** Kicktipp turned the email/password pair down. Trying again will not help. */
+export class LoginFailedError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'LoginFailedError';
+    }
+}
 export async function login(page, username, password) {
     status(t('status.loggingIn'));
     await page.goto(urlLogin());
@@ -56,7 +63,7 @@ export async function login(page, username, password) {
     // A failed login lands back on the login page.
     if (page.isAuthRedirect()) {
         statusClear();
-        throw new Error(t('login.failed'));
+        throw new LoginFailedError(t('login.failed'));
     }
     statusClear();
 }

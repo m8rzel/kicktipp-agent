@@ -35,6 +35,36 @@ async function loadPage(page, url) {
     }
     return cheerio.load(await page.content());
 }
+/**
+ * Send the prediction form, with an audit record before and after: if the
+ * process dies mid-submit, the intent record still shows what was about to
+ * happen.
+ *
+ * A POST that ends on the login page means Kicktipp dropped the session
+ * between loading the form and sending it, and threw the bets away. That is
+ * reported as an AuthError, never as "submitted", so the caller can log in
+ * again and send the same form once more. (Page follows redirects itself:
+ * should Kicktipp ever save first and redirect to the login page later, the
+ * second send writes the same values again.)
+ */
+export async function submitAudited(page, record) {
+    appendAudit({ ...record, outcome: 'intent' });
+    try {
+        await page.click('button[name="submitbutton"]');
+        if (page.isAuthRedirect()) {
+            throw new AuthError('Kicktipp session expired while submitting. The bets were not saved.');
+        }
+    }
+    catch (err) {
+        appendAudit({
+            ...record,
+            at: new Date().toISOString(),
+            outcome: `failed:${err instanceof Error ? err.message : String(err)}`,
+        });
+        throw err;
+    }
+    appendAudit({ ...record, at: new Date().toISOString(), outcome: 'submitted' });
+}
 function spieltagIndexFromPage($) {
     const hidden = $('input[name="spieltagIndex"]').attr('value');
     const selected = $('select[name="spieltagIndex"] option:selected').attr('value') ??
@@ -501,21 +531,7 @@ export async function placeBets(page, community, bets, matchday, submit = true, 
         appendAudit({ ...record, outcome: 'dry-run' });
         return placed;
     }
-    // Written before and after: if the process dies mid-submit, the intent
-    // record still shows what was about to happen.
-    appendAudit({ ...record, outcome: 'intent' });
-    try {
-        await page.click('button[name="submitbutton"]');
-    }
-    catch (err) {
-        appendAudit({
-            ...record,
-            at: new Date().toISOString(),
-            outcome: `failed:${err instanceof Error ? err.message : String(err)}`,
-        });
-        throw err;
-    }
-    appendAudit({ ...record, at: new Date().toISOString(), outcome: 'submitted' });
+    await submitAudited(page, record);
     return placed;
 }
 export async function fetchBonusQuestions(page, community) {
@@ -687,19 +703,7 @@ export async function placeBonusBets(page, community, bets, submit = true, sourc
         appendAudit({ ...record, outcome: 'dry-run' });
         return placed;
     }
-    appendAudit({ ...record, outcome: 'intent' });
-    try {
-        await page.click('button[name="submitbutton"]');
-    }
-    catch (err) {
-        appendAudit({
-            ...record,
-            at: new Date().toISOString(),
-            outcome: `failed:${err instanceof Error ? err.message : String(err)}`,
-        });
-        throw err;
-    }
-    appendAudit({ ...record, at: new Date().toISOString(), outcome: 'submitted' });
+    await submitAudited(page, record);
     return placed;
 }
 /**
@@ -963,18 +967,6 @@ export async function placeBetsForMember(page, community, member, bets, matchday
         appendAudit({ ...record, outcome: 'dry-run' });
         return placed;
     }
-    appendAudit({ ...record, outcome: 'intent' });
-    try {
-        await page.click('button[name="submitbutton"]');
-    }
-    catch (err) {
-        appendAudit({
-            ...record,
-            at: new Date().toISOString(),
-            outcome: `failed:${err instanceof Error ? err.message : String(err)}`,
-        });
-        throw err;
-    }
-    appendAudit({ ...record, at: new Date().toISOString(), outcome: 'submitted' });
+    await submitAudited(page, record);
     return placed;
 }

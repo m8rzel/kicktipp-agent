@@ -4,8 +4,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { localizeMatchDates } from './helpers/match-date.js';
 import { applyNotifierSettings, notifierSnapshot } from './notify/backends.js';
-import { launchBrowser } from './browser.js';
-import { saveCommunity, savePlayer, loadCommunity, loadPlayer, hasUsableAuth, isSessionOnly, SessionOnlyExpiredError, getActiveProfile, readDefaultStrategy, readUiLanguage, readUiSite } from './config.js';
+import { launchBrowser, LoginFailedError } from './browser.js';
+import { saveCommunity, savePlayer, loadCommunity, loadPlayer, hasUsableAuth, isSessionOnly, SessionOnlyExpiredError, CredentialsUnreadableError, authMode, hasEnvCredentials, getActiveProfile, readDefaultStrategy, readUiLanguage, readUiSite } from './config.js';
 import { VERSION } from './version.js';
 import { resolveLanguage, setLanguage } from './i18n/index.js';
 import { resolveBaseUrl, setUrlBase } from './url.js';
@@ -30,34 +30,59 @@ setLanguage(resolveLanguage({ configLanguage: readUiLanguage() }));
 setUrlBase(resolveBaseUrl({ configSite: readUiSite() }));
 // ── Persistent Kicktipp session ────────────────────────────────────
 let pageInstance = null;
-async function setupPrompt(kind) {
+async function setupPrompt(reason) {
     const url = await ensureSetupListener({
         keepAlive: false,
         onSaved: () => {
             pageInstance = null;
         },
     });
-    const text = kind === 'expired'
-        ? `Kicktipp session expired. Ask the user to open ${url} to reconnect.`
-        : `Not set up yet. Ask the user to open ${url} to connect their Kicktipp account.`;
+    const text = {
+        missing: `Not set up yet. Ask the user to open ${url} to connect their Kicktipp account.`,
+        session_only_expired: `The saved Kicktipp session expired, and no password is stored to log in again (session-only mode). Ask the user to open ${url} to reconnect. For unattended runs, leave "session only" unticked there so the tool can log in again by itself.`,
+        rejected: `Kicktipp rejected the saved email and password. Ask the user to open ${url} to enter them again.`,
+        unreadable: `The saved Kicktipp password cannot be read on this machine: it is tied to the host and user that saved it, and a rebuilt container counts as a new host. Ask the user to open ${url} to enter it again, or set KICKTIPP_EMAIL and KICKTIPP_PASSWORD in the MCP client's env.`,
+        switch_account: `Ask the user to open ${url} to sign in to Kicktipp with the account they want.`,
+    }[reason];
     return { url, text };
+}
+/** A tool cannot go on until the user has been through the setup page. */
+class SetupNeededError extends Error {
+    reason;
+    url;
+    constructor(reason, url, text) {
+        super(text);
+        this.reason = reason;
+        this.url = url;
+        this.name = 'SetupNeededError';
+    }
+}
+async function setupNeeded(reason) {
+    const { url, text } = await setupPrompt(reason);
+    return new SetupNeededError(reason, url, text);
 }
 async function getPage() {
     if (pageInstance && !pageInstance.isClosed())
         return pageInstance;
-    if (!hasUsableAuth()) {
-        const { text } = await setupPrompt('missing');
-        throw new Error(text);
-    }
+    if (!hasUsableAuth())
+        throw await setupNeeded('missing');
     try {
         const { page } = await launchBrowser();
         pageInstance = page;
         return page;
     }
     catch (err) {
-        if (err instanceof SessionOnlyExpiredError) {
-            const { text } = await setupPrompt('expired');
-            throw new Error(text);
+        if (err instanceof SessionOnlyExpiredError)
+            throw await setupNeeded('session_only_expired');
+        if (err instanceof CredentialsUnreadableError)
+            throw await setupNeeded('unreadable');
+        if (err instanceof LoginFailedError) {
+            // The setup page writes config.ini, but the environment wins over the
+            // file: sending the user there would change nothing.
+            if (hasEnvCredentials()) {
+                throw new Error('Kicktipp rejected KICKTIPP_EMAIL / KICKTIPP_PASSWORD from the environment. Fix them in the MCP client configuration.');
+            }
+            throw await setupNeeded('rejected');
         }
         throw err;
     }
@@ -69,9 +94,16 @@ async function discardSession() {
         await stale.close();
 }
 /**
- * Run a read-only tool body, retrying once with a fresh login if the cached
- * session turned out to be expired. Mutating tools must not use this: their
- * first attempt may already have submitted data.
+ * Run a tool body, retrying once with a fresh login if the cached session
+ * turned out to be expired.
+ *
+ * Safe for the betting tools as well. An AuthError is raised while loading a
+ * page, before any submit, or when a submit ended on the login page
+ * (submitAudited in core.ts). In that last case Kicktipp has almost
+ * certainly thrown the form away; if it did save it before a later redirect,
+ * sending the same form again only writes the same values once more. Only
+ * the audit log shows the extra attempt. Without this retry an unattended
+ * run stalls on a setup link although the stored login would have worked.
  */
 async function withFreshSession(fn) {
     try {
@@ -81,7 +113,15 @@ async function withFreshSession(fn) {
         if (!(err instanceof AuthError))
             throw err;
         await discardSession();
-        return fn();
+    }
+    try {
+        return await fn();
+    }
+    catch (err) {
+        if (!(err instanceof AuthError))
+            throw err;
+        // The login itself went through, so a setup page would not help.
+        throw new Error(`Logged in to Kicktipp again, but it still sends this request to the login page. Nothing was saved. (${err.message})`);
     }
 }
 // ── MCP Server ─────────────────────────────────────────────────────
@@ -99,7 +139,7 @@ function jsonResult(data) {
 }
 const OUTPUT_SCHEMA = { data: z.unknown() };
 const readOnly = isReadOnly();
-const server = new McpServer({ name: 'kicktipp', version: VERSION }, { instructions: (readOnly ? 'READ-ONLY CONNECTION: betting and settings tools are not available, and no tool here can change anything on Kicktipp. Do not offer to place bets. ' : '') + 'Kicktipp football prediction game (kicktipp.com and kicktipp.de). If the user asks to set up, connect, or log in to Kicktipp, call connect_account and ask them to open the setup_url in their browser. Do not ask for a password in chat. Otherwise call get_status first. If only the community is missing, call get_communities then set_community.' });
+const server = new McpServer({ name: 'kicktipp', version: VERSION }, { instructions: (readOnly ? 'READ-ONLY CONNECTION: betting and settings tools are not available, and no tool here can change anything on Kicktipp. Do not offer to place bets. ' : '') + 'Kicktipp football prediction game (kicktipp.com and kicktipp.de). If the user asks to set up, connect, or log in to Kicktipp, call connect_account and ask them to open the setup_url in their browser. Do not ask for a password in chat. Otherwise call get_status first. Tools log in again by themselves when the Kicktipp session expires: only ask the user to open a setup page when a tool result or error contains one. If only the community is missing, call get_communities then set_community.' });
 server.registerTool('get_status', {
     description: 'Check current configuration. Call this first for a status snapshot. If the user wants to connect or set up Kicktipp, call connect_account instead. If setup_url is set, ask the user to open that localhost page. Most tools require a community.',
     inputSchema: {},
@@ -122,6 +162,7 @@ server.registerTool('get_status', {
         read_only: readOnly,
         profile: getActiveProfile(),
         credentials_saved: usable,
+        auth_mode: authMode(),
         session_only: isSessionOnly(),
         community: community || null,
         player: player || null,
@@ -132,34 +173,58 @@ server.registerTool('get_status', {
     });
 });
 server.registerTool('connect_account', {
-    description: 'Connect or reconnect a Kicktipp account. Call this when the user asks to set up kicktipp-agent, log in, or reconnect. Returns a localhost URL they must open in a browser. Never ask them to paste a password into chat.',
+    description: 'Connect a Kicktipp account, or check that the saved login still works. It logs in for real: connected=true means every tool can run, and no setup page is needed. Only when it returns a setup_url must the user open that localhost page in a browser. Never ask them to paste a password into chat. Tools log in again by themselves when the session expires, and one that cannot returns its own setup link.',
     inputSchema: {
         reconnect: z
             .boolean()
             .optional()
-            .describe('If true, start a fresh setup even when an account is already connected.'),
+            .describe('Kept for older clients. Same as leaving it out: the login is checked, and a link comes back only if it fails.'),
+        switch_account: z
+            .boolean()
+            .optional()
+            .describe('Only when the user explicitly asks to sign in with a different account or to re-enter the password: always returns a setup link, even when the saved login works.'),
     },
     outputSchema: OUTPUT_SCHEMA,
-}, async ({ reconnect }) => {
+}, async ({ switch_account }) => {
     const community = loadCommunity();
-    if (hasUsableAuth() && !reconnect) {
+    if (switch_account) {
+        const prompt = await setupPrompt(hasUsableAuth() ? 'switch_account' : 'missing');
         return jsonResult({
-            connected: true,
-            setup_url: null,
+            connected: false,
+            setup_url: prompt.url,
             community: community || null,
             session_only: isSessionOnly(),
-            message: community
-                ? 'Already connected. Pass reconnect=true to sign in again in the browser.'
-                : 'Account is connected but no community is set. Call get_communities then set_community.',
+            message: prompt.text,
         });
     }
-    const prompt = await setupPrompt(hasUsableAuth() ? 'expired' : 'missing');
+    try {
+        // Prove the login instead of trusting what is on disk: a fresh launch
+        // reuses the saved cookie if Kicktipp still accepts it, and otherwise
+        // logs in with the stored password.
+        await discardSession();
+        await getPage();
+    }
+    catch (err) {
+        if (!(err instanceof SetupNeededError))
+            throw err;
+        return jsonResult({
+            connected: false,
+            reason: err.reason,
+            setup_url: err.url,
+            community: community || null,
+            session_only: isSessionOnly(),
+            message: err.message,
+        });
+    }
     return jsonResult({
-        connected: false,
-        setup_url: prompt.url,
-        community: null,
+        connected: true,
+        login_verified: true,
+        setup_url: null,
+        community: community || null,
         session_only: isSessionOnly(),
-        message: prompt.text,
+        message: community
+            ? 'Connected, and the login works. No setup needed.'
+            : 'Connected, and the login works, but no community is set. Call get_communities then set_community.',
     });
 });
 server.registerTool('get_today_matches', {
@@ -259,7 +324,7 @@ if (!readOnly) {
         description: 'Set the active community. Use get_communities first to see available options, then pass the exact name.',
         inputSchema: { name: z.string().describe('Exact community name as returned by get_communities.') },
         outputSchema: OUTPUT_SCHEMA,
-    }, async ({ name }) => {
+    }, async ({ name }) => withFreshSession(async () => {
         const page = await getPage();
         const communities = await fetchCommunities(page);
         if (!communities.includes(name)) {
@@ -267,14 +332,14 @@ if (!readOnly) {
         }
         saveCommunity(name);
         return jsonResult({ success: true, community: name });
-    });
+    }));
 }
 if (!readOnly) {
     server.registerTool('set_player', {
         description: 'Set which player you are (for leaderboard highlighting). Use get_players first to see available names.',
         inputSchema: { name: z.string().describe('Exact player name as returned by get_players.') },
         outputSchema: OUTPUT_SCHEMA,
-    }, async ({ name }) => {
+    }, async ({ name }) => withFreshSession(async () => {
         const page = await getPage();
         const community = await resolveCommunity(page);
         const players = await fetchPlayers(page, community);
@@ -283,7 +348,7 @@ if (!readOnly) {
         }
         savePlayer(name);
         return jsonResult({ success: true, player: name });
-    });
+    }));
 }
 if (!readOnly) {
     server.registerTool('set_notify', {
@@ -483,12 +548,12 @@ server.registerTool('sync_history', {
         to: z.number().int().min(1).max(34).optional().describe('Last matchday (default: Kicktipp current matchday, not 34).'),
     },
     outputSchema: OUTPUT_SCHEMA,
-}, async ({ from, to }) => {
+}, async ({ from, to }) => withFreshSession(async () => {
     const page = await getPage();
     const community = await resolveCommunity(page);
     const result = await syncSeason(page, community, { from, to });
     return jsonResult(result);
-});
+}));
 server.registerTool('get_rival_analysis', {
     description: "Compare the user with another player for one matchday: the points gap, how much each remaining match can still swing it, and what has to happen to overtake them. Check the 'mode' field before answering - 'exact' means both bet sets are known, 'bounds' means the rival's bets are still hidden and the figures are best/worst limits, not predictions. Also report rules.source, since the point values may be assumed defaults rather than this community's real ones.",
     inputSchema: {
@@ -559,7 +624,7 @@ if (!readOnly) {
             dry_run: z.boolean().optional().describe('Validate and report without submitting.'),
         },
         outputSchema: OUTPUT_SCHEMA,
-    }, async ({ member, confirm_member, bets, matchday, dry_run }) => {
+    }, async ({ member, confirm_member, bets, matchday, dry_run }) => withFreshSession(async () => {
         const page = await getPage();
         const community = await resolveCommunity(page);
         const resolved = resolveMember(await fetchMembers(page, community), member);
@@ -570,7 +635,7 @@ if (!readOnly) {
         }
         const placed = await placeBetsForMember(page, community, resolved, bets, matchday, !dry_run, 'mcp:place_bets_for_member');
         return jsonResult({ success: true, dry_run: !!dry_run, member: resolved, placed });
-    });
+    }));
 }
 if (!readOnly) {
     server.registerTool('place_bets', {
@@ -581,12 +646,12 @@ if (!readOnly) {
             dry_run: z.boolean().optional().describe('If true, validate and return what would be placed without submitting.'),
         },
         outputSchema: OUTPUT_SCHEMA,
-    }, async ({ bets, matchday, dry_run }) => {
+    }, async ({ bets, matchday, dry_run }) => withFreshSession(async () => {
         const page = await getPage();
         const community = await resolveCommunity(page);
         const placed = await placeBets(page, community, bets, matchday, !dry_run, 'mcp:place_bets');
         return jsonResult({ success: true, dry_run: !!dry_run, placed });
-    });
+    }));
 }
 if (!readOnly) {
     server.registerTool('place_bonus_bets', {
@@ -596,12 +661,12 @@ if (!readOnly) {
             dry_run: z.boolean().optional().describe('If true, validate and return what would be placed without submitting.'),
         },
         outputSchema: OUTPUT_SCHEMA,
-    }, async ({ bets, dry_run }) => {
+    }, async ({ bets, dry_run }) => withFreshSession(async () => {
         const page = await getPage();
         const community = await resolveCommunity(page);
         const placed = await placeBonusBets(page, community, bets, !dry_run, 'mcp:place_bonus_bets');
         return jsonResult({ success: true, dry_run: !!dry_run, placed });
-    });
+    }));
 }
 // ── Resources ──────────────────────────────────────────────────────
 //

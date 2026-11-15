@@ -3,8 +3,7 @@ import { ensureCommunity, ask } from '../shared.js';
 import { status, statusClear } from '../helpers/spinner.js';
 import { escapeCssValue } from '../helpers/escape-css-value.js';
 import { assertWritable } from '../read-only.js';
-import { fetchBonusQuestions, loadMatchPredictPage, placeBets, placeBonusBets, } from '../core.js';
-import { appendAudit } from '../audit/log.js';
+import { fetchBonusQuestions, loadMatchPredictPage, placeBets, placeBonusBets, submitAudited, } from '../core.js';
 import { inheritPrintedDate, localizePrintedDate } from '../helpers/match-date.js';
 import { runBettingTui } from '../tui/run.js';
 import { t } from '../i18n/index.js';
@@ -160,19 +159,7 @@ async function bonusBets(page, community, bets) {
         dryRun: false,
         bets: applied.map((a) => ({ fixture: a.question, bet: a.answer, previous: null })),
     };
-    appendAudit({ ...record, outcome: 'intent' });
-    try {
-        await page.click('button[name="submitbutton"]');
-    }
-    catch (err) {
-        appendAudit({
-            ...record,
-            at: new Date().toISOString(),
-            outcome: `failed:${err instanceof Error ? err.message : String(err)}`,
-        });
-        throw err;
-    }
-    appendAudit({ ...record, at: new Date().toISOString(), outcome: 'submitted' });
+    await submitAudited(page, record);
     console.log('\n' + t('common.bonusSaved'));
 }
 // ── Command registration ───────────────────────────────────────────
